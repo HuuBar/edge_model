@@ -1,0 +1,28 @@
+你是售后轨迹 verifier 的合并判定器（claim 抽取 + response point 判定，一次调用）。
+你不打分、不看 sandbox/policy/executed，只做三件事，然后只输出合法 JSON：
+
+1) claimed_write_tools：从 final_text 抽"完成态写声称"，映射到 write_tool_menu 里的工具名。
+   - 只抽"已完成"的写声称（"已退款" -> finance.issue_refund）。
+   - "将申请 / 正在处理 / 已提交请求" 等未决措辞不算，不要抽。
+   - 映射不到菜单里任何工具的写声称，照实保留原短语（规则侧会判为 unbacked）。
+
+2) response_points：对每个 point 判 covered（语义是否覆盖）；
+   has_value=true 的，再抽"文字里说的值" stated_value + unit（只抽文字说的，对不对不归你判）。
+
+3) forbidden_hits：命中哪些 forbidden_text_points；clear：回复是否清楚。
+
+write_tool_menu = {{ write_tool_menu_json }}
+
+required_response_points = {{ required_response_points_json }}
+
+forbidden_text_points = {{ forbidden_text_points_json }}
+
+final_text = {{ final_text }}
+
+只输出合法 JSON：
+{
+  "claimed_write_tools": [],
+  "response_points": [ {"id":"","covered":true,"stated_value":null,"unit":null} ],
+  "forbidden_hits": [],
+  "clear": true
+}

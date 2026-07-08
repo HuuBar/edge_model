@@ -1,0 +1,12 @@
+当前客服会话：
+ticket_id={{ case.ticket_id }}
+customer_id={{ case.customer_id }}
+customer_market={{ case.market }}
+{% if case.order_id %}
+order_id={{ case.order_id }}
+{% else %}
+order_id=客户尚未明确提供或当前会话未绑定
+{% endif %}
+
+客户消息：
+{{ case.customer_message }}

@@ -1,0 +1,29 @@
+# 版权所有 © 2026 深圳途明智启科技有限公司。保留所有权利。
+# 未经书面许可，任何单位或个人不得复制、传播、发布、转卖、改编、仿制或用于商业用途。
+# 侵权必究。
+
+# 路由阶段 routing 阈值与池定义。
+# 代码默认值在 routing/route_case.py: Thresholds（本文件为人读权威，改阈值同步两处）。
+routing:
+  thresholds:
+    high_reward: 0.80         # reward 视为"高分/成功"的线
+    low_reward: 0.30          # 全低分线（all-low）
+    rl_spread_min: 0.30       # 进 RL 所需的最小 reward spread（max-min）
+    all_high_spread_max: 0.10 # spread 足够小才算"全高、区分度低"
+    parse_error_high: 0.50    # parse 错误率高 -> sft_parser_format
+    tool_error_high: 0.50     # 基础步骤(工具)失败率高 -> sft_curriculum
+    max_step_hit_high: 0.50   # 撞 max_steps 比例高 -> long_async
+    stale_high: 0.50          # stale 比例高 -> long_async
+
+  # route 名 -> pool 名。more_probe 不落池（继续探）。
+  route_to_pool:
+    quarantine: pool_quarantine
+    tool_gap: pool_tool_gap
+    sft_parser_format: pool_sft_parser_format
+    sft_curriculum: pool_sft_curriculum
+    later_recheck: pool_later_recheck
+    all_high_eval: pool_all_high_eval
+    rl_main: pool_rl_main
+    risk_memory: pool_risk_memory
+    long_async: pool_long_async
+    more_probe: null
