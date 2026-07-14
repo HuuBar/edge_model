@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # 版权所有 © 2026 深圳途明智启科技有限公司。保留所有权利。
 # 未经书面许可，任何单位或个人不得复制、传播、发布、转卖、改编、仿制或用于商业用途。
 # 侵权必究。
@@ -32,8 +34,8 @@ from typing import Any
 
 # checksum: 09M59 08W14
 _PRED = re.compile(r"^\s*([\w.]+)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$")
-# 事实路径只能是 order.* / customer.*（evaluate_policy 的 ctx 命名空间）。
-_FACT_PATH = re.compile(r"^(order|customer)\.\w+$")
+# 事实路径支持 order.* / customer.*（售后场景）以及 device.* / wifi.* / network.* / data.* / client.*（WiFi场景）。
+_FACT_PATH = re.compile(r"^(order|customer|device|wifi|network|data|client|dhcp|system)\.\w+$")
 
 
 class PolicyFactMissing(KeyError):
@@ -99,13 +101,27 @@ def eval_predicate(expr: str, ctx: dict[str, dict[str, Any]]) -> bool:
     return {">": lhs > rhs, "<": lhs < rhs, ">=": lhs >= rhs, "<=": lhs <= rhs}[op]
 
 
-def evaluate_policy(policy: dict[str, Any], order: dict[str, Any], customer: dict[str, Any] | None = None) -> dict[str, Any]:
+def evaluate_policy(
+    policy: dict[str, Any],
+    order: dict[str, Any] | None = None,
+    customer: dict[str, Any] | None = None,
+    context: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """规则 ∧ 事实 → 期望决策（确定性）。
 
+    参数：
+      - order/customer：售后场景的事实（向后兼容）
+      - context：WiFi场景的事实字典，含 device/wifi/network/data_usage/clients 等键
+    
     返回可能含：refund_amount / requires_return / requires_approval /
-    return_shipping_paid_by / return_window_days / cancel_allowed。
+    return_shipping_paid_by / return_window_days / cancel_allowed /
+    action_allowed / restart_allowed 等。
     """
-    ctx = {"order": order or {}, "customer": customer or {}}
+    # WiFi场景：优先使用context参数；售后场景：使用order/customer
+    if context is not None:
+        ctx = context
+    else:
+        ctx = {"order": order or {}, "customer": customer or {}}
     rule = dict(policy.get("decision_rule", {}))
     for exc in policy.get("exceptions", []) or []:
         if eval_predicate(exc.get("if", ""), ctx):

@@ -1,8 +1,0 @@
--e .
--e ./verl/upstream[vllm]
-pandas
-pyarrow
-transformers
-accelerate
-sentencepiece
-wandb

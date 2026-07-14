@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # 版权所有 © 2026 深圳途明智启科技有限公司。保留所有权利。
 # 未经书面许可，任何单位或个人不得复制、传播、发布、转卖、改编、仿制或用于商业用途。
 # 侵权必究。
@@ -23,50 +25,51 @@ from typing import Any
 from envs.sandbox_state import SandboxState
 from envs.schemas import ToolDefinition, ToolExecutionError
 
+# ============================================================================
 # 生产工具实现模块的导入路径列表。
+# ============================================================================
+# WiFi 客服场景共 21 个工具：
+#   - 读工具 8 个：查询设备/WiFi/网络/流量/客户端/日志/政策
+#   - 写工具 13 个：修改 WiFi 配置、开关、模式、流量限制、IP 配置、设备运维
+#
 # 每个模块内必须暴露一个名为 TOOL 的 ToolDefinition（见 _load_default_tools）。
-# 这里登记客服域线上可用的工具：读工具（crm/oms/tms/policy/warranty 等查询）与写工具
-# （finance.issue_refund、returns.create_label、ticket.close 等会落 sandbox 台账的动作）。
-# reserved 或缺少支撑数据/发现入口的工具不进入默认生产注册表。
 # 用"模块路径清单 + 动态 import"而非硬编码 import，是为了新增工具只需加一行路径、
 # 注册逻辑零改动；模块与工具一一对应。
+# ============================================================================
 TOOL_MODULES = [
-    "envs.toollist.crm_get_customer",
-    "envs.toollist.oms_list_orders",
-    "envs.toollist.oms_get_order",
-    "envs.toollist.tms_get_tracking",
-    "envs.toollist.attachment_list",
-    "envs.toollist.attachment_inspect",
-    "envs.toollist.policy_search",
-    "envs.toollist.finance_simulate_refund",
-    "envs.toollist.finance_get_refund_status",
-    "envs.toollist.payment_get_charge",
-    "envs.toollist.wms_get_fulfillment",
-    "envs.toollist.invoice_get_invoice",
-    "envs.toollist.returns_get_status",
-    "envs.toollist.warranty_check",
-    "envs.toollist.diagnostics_troubleshoot",
-    "envs.toollist.subscription_get_status",
-    "envs.toollist.oms_cancel_order",
-    "envs.toollist.oms_modify_order",
-    "envs.toollist.tms_intercept_shipment",
-    "envs.toollist.tms_reroute_shipment",
-    "envs.toollist.carrier_open_investigation",
-    "envs.toollist.finance_issue_refund",
-    "envs.toollist.payment_open_dispute_case",
-    "envs.toollist.approval_create_case",  # escalate_approval 路径的写工具（taxonomy 已声明该决策形态，2026-06-20 un-defer）
-    "envs.toollist.reshipment_create",
-    "envs.toollist.invoice_update_vat",
-    "envs.toollist.returns_create_label",
-    "envs.toollist.subscription_cancel",
-    "envs.toollist.message_reply",
-    "envs.toollist.ticket_close",
-    "envs.toollist.ticket_handoff",
+    # --- 读工具（8个）---
+    "envs.toollist.wifi_get_info",           # 读取 WiFi 配置与状态
+    "envs.toollist.wifi_list_clients",       # 读取已连接客户端列表
+    "envs.toollist.device_get_info",         # 读取设备基本信息
+    "envs.toollist.data_get_usage",          # 读取流量使用统计
+    "envs.toollist.network_get_status",      # 读取网络实时状态
+    "envs.toollist.network_get_settings",    # 读取网络高级设置
+    "envs.toollist.system_get_logs",         # 读取系统日志
+    "envs.toollist.policy_search",           # 检索客服策略/规则
+    # --- 写工具 - WiFi 配置类（4个）---
+    "envs.toollist.wifi_set_config",         # 设置 WiFi SSID/密码/加密方式
+    "envs.toollist.wifi_set_channel",        # 设置 WiFi 信道
+    "envs.toollist.wifi_set_bandwidth",      # 设置 WiFi 频带宽度
+    "envs.toollist.wifi_hide_ssid",          # 设置 SSID 隐藏/可见
+    # --- 写工具 - 开关与模式类（3个）---
+    "envs.toollist.wifi_open",               # 开启 WiFi
+    "envs.toollist.wifi_close",              # 关闭 WiFi
+    "envs.toollist.wifi_switch_5g_mode",     # 切换蜂窝网络 5G 注册模式（SA/NSA/4G）
+    "envs.toollist.wifi_switch_5g_priority", # 开关 WiFi 5GHz 频段优选功能
+    # --- 写工具 - 流量限制类（2个）---
+    "envs.toollist.data_set_limit",          # 设置流量上限
+    "envs.toollist.data_set_alert_threshold",# 设置流量告警阈值
+    # --- 写工具 - IP 配置类（2个）---
+    "envs.toollist.network_set_ip_mode",     # 设置 IP 分配模式（DHCP/静态）
+    "envs.toollist.network_set_ip_pool",     # 设置 DHCP 地址池范围
+    # --- 写工具 - 运维操作类（2个）---
+    "envs.toollist.device_restart",          # 重启设备
+    "envs.toollist.user_change_password",    # 修改管理密码
 ]
 
 
 class ToolFactory:
-    """注册并执行课程环境工具。
+    """注册并执行 WiFi 客服环境工具。
 
     持有工具注册表（name -> ToolDefinition）和按命名空间统计的故障计数器。
     一个 ToolFactory 实例可服务多条并发 rollout：故障计数按 (namespace_id, tool_name)
@@ -86,7 +89,7 @@ class ToolFactory:
         """动态 import TOOL_MODULES 中的每个模块，收集其 TOOL 对象构成注册表。
 
         约定每个工具模块在模块级暴露一个名为 TOOL 的 ToolDefinition；
-        以 tool.name 为键（而非模块名）入表，使工具名与调用方一致（如 "finance.issue_refund"）。
+        以 tool.name 为键（而非模块名）入表，使工具名与调用方一致（如 "wifi.set_config"）。
         动态加载让"增删工具 = 改 TOOL_MODULES 列表"，注册逻辑无需变更。
         """
         # registry 是运行时唯一的工具名索引。后续 get/tool_schemas/execute 都只查这张表，
@@ -186,7 +189,7 @@ class ToolFactory:
             "namespace_id": context.get("namespace_id"),
         }
         try:
-            # allowed_tools 是旧接口残留。runtime 不在这里做 case 级授权，避免“执行层截断轨迹”；
+            # allowed_tools 是旧接口残留。runtime 不在这里做 case 级授权，避免"执行层截断轨迹"；
             # 是否允许该写动作由 verifier 看完整轨迹后评分。
             _ = allowed_tools  # compatibility only; verifier handles authorization, runtime no longer gates tools.
             tool = self.get(tool_name)  # 1) 取定义（未知工具会抛 unknown_tool）

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # 版权所有 © 2026 深圳途明智启科技有限公司。保留所有权利。
 # 未经书面许可，任何单位或个人不得复制、传播、发布、转卖、改编、仿制或用于商业用途。
 # 侵权必究。
@@ -70,13 +72,25 @@ class LocalHFProvider:
             prompt = str(messages_or_prompt)
         # 编码并搬到模型所在设备
         inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
+        # 生成前清理缓存，避免NPU显存碎片导致OOM（尤其对4B/8B大模型）
+        if hasattr(self._model.device, 'type') and self._model.device.type == 'npu':
+            import torch
+            torch.npu.empty_cache()
+            torch.npu.synchronize()
+        # 构建generate参数，确保与模型config不冲突
+        gen_kwargs = {
+            "max_new_tokens": int(config.get("max_new_tokens", 512)),
+        }
+        # 只有当do_sample=True时才传temperature/top_p，避免与模型默认config冲突
+        do_sample = bool(config.get("do_sample", True))
+        gen_kwargs["do_sample"] = do_sample
+        if do_sample:
+            gen_kwargs["temperature"] = float(config.get("temperature", 0.7))
+            gen_kwargs["top_p"] = float(config.get("top_p", 0.9))
+            # 如果模型config有默认top_k，可能会被使用；我们不覆盖
         output_ids = self._model.generate(
             **inputs,
-            # 采样参数从 config 取，给出本地推理常用默认值
-            max_new_tokens=int(config.get("max_new_tokens", 512)),
-            do_sample=bool(config.get("do_sample", True)),
-            temperature=float(config.get("temperature", 0.7)),
-            top_p=float(config.get("top_p", 0.9)),
+            **gen_kwargs,
         )
         # 切掉输入部分，仅保留新生成的 token（generate 返回的是 prompt+续写拼接）
         generated = output_ids[0][inputs["input_ids"].shape[-1] :]

@@ -5,13 +5,13 @@
 """env_snapshot 与 sandbox 状态的 schema 辅助。
 
 env_snapshot.json 是「世界状态」：
-- readonly_tables：只读业务台账（订单/客户/物流/发票…），read 工具从这里取真值；
-- sandbox_initial：可写沙箱台账（各业务 namespace 的副作用账本，初始为空），写工具往这里落记录，
+- readonly_tables：只读设备台账（设备信息/WiFi配置/网络状态/连接客户端/流量统计…），read 工具从这里取真值；
+- sandbox_initial：可写沙箱台账（各 WiFi 操作的副作用账本，初始为空），写工具往这里落记录，
   verifier 事后查这些台账判断「写动作做没做 / 做对没」；
 - policies：policy 数据，policy.search 命中正确性以它为准；
-- external_services / tool_faults：承运商/支付等外部服务的确定性「罐头响应」与注入的故障/延迟配置
+- external_services / tool_faults：外部服务的确定性「罐头响应」与注入的故障/延迟配置
   （区分环境注入报错 vs LLM 自身报错——前者不扣分）；
-- reference_now：参考时钟，stalled_days / 退货窗口 / eta 都相对它计算。
+- reference_now：参考时钟，时间窗口计算相对它。
 
 SANDBOX_KEYS / READONLY_TABLES 这两张表把「合法 namespace 全集」钉死，default_sandbox() 据此
 建出全部为空的初始沙箱，model_validator 再补齐缺失键，保证下游 verifier 按固定 key 查台账时不会
@@ -24,80 +24,79 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# 全部可写沙箱台账的 key 列表（每个对应一类写副作用的账本）：
+# ============================================================================
+# 全部可写沙箱台账的 key 列表（每个对应一类写副作用的账本）
+# ============================================================================
+# WiFi 客服场景共 5 个台账，覆盖 13 个写工具的全部副作用：
+#   - wifi_config_log:    WiFi 参数配置类写操作（ssid/密码/信道/频段/隐藏等）
+#   - switch_log:         开关与模式切换类写操作（开WiFi/关WiFi/切换5G模式等）
+#   - data_limit_log:     流量限制类写操作（设置流量上限/阈值）
+#   - ip_config_log:      IP 配置类写操作（IP分配模式/地址池/静态绑定等）
+#   - operation_log:      通用运维操作（重启/恢复出厂/改密码等）
+# ============================================================================
 SANDBOX_KEYS = [
-    "sandbox_refund_ledger",         # 退款台账（finance.issue_refund 等落账）
-    "sandbox_returns",               # 退货/退货面单台账（returns.create_label 等）
-    "sandbox_reshipments",           # 补发/换货台账
-    "sandbox_order_state",           # 订单状态变更（dict 形：取消/修改等）
-    "sandbox_carrier_investigation", # 承运商调查工单
-    "sandbox_carrier_intercept",     # 承运商拦截（在途拦截）
-    "sandbox_carrier_reroute",       # 承运商改址/改派
-    "sandbox_approval_cases",        # 需审批的升级工单
-    "sandbox_payment_disputes",      # 支付争议/拒付处理
-    "sandbox_invoice_changes",       # 发票/VAT 变更
-    "sandbox_subscription_state",    # 订阅/会员状态（dict 形）
-    "sandbox_security_cases",        # 账户安全/隐私工单
-    "sandbox_message_log",           # 对客发消息记录
-    "sandbox_ticket_state",          # 工单总体状态（dict 形）
-    "sandbox_audit_log",             # 审计日志
+    "wifi_config_log",    # WiFi 配置变更台账（wifi.set_config / set_channel / set_bandwidth 等落账）
+    "switch_log",         # 开关/模式切换台账（wifi.open / wifi.close / wifi.switch_5g_mode 等落账）
+    "data_limit_log",     # 流量限制操作台账（data.set_limit / set_alert_threshold 等落账）
+    "ip_config_log",      # IP 配置变更台账（network.set_ip_mode / set_ip_pool 等落账）
+    "operation_log",      # 通用运维操作台账（device.restart / reset / user.change_password 等落账）
 ]
 
-# 全部只读业务台账的 key 列表（read 工具的真值来源 / outcome 真值解析 order.*）：
+# ============================================================================
+# 全部只读业务台账的 key 列表（read 工具的真值来源）
+# ============================================================================
+# WiFi 客服场景共 9 张只读表，覆盖设备状态、网络状态、客户端、流量等维度：
+#   - device_info:        设备硬件与固件信息
+#   - wifi_config:        WiFi 当前运行配置（ssid/密码/信道/频段/隐藏状态等）
+#   - network_status:     网络实时状态（上行/下行/延迟/丢包/连接数等）
+#   - connected_clients:  当前已连接客户端列表（MAC/IP/名称/连接时长/流量等）
+#   - data_usage:         流量使用统计（总用量/各客户端用量/历史趋势等）
+#   - network_settings:   网络高级设置（MTU/IPv6/UPnP/防火墙等）
+#   - dhcp_leases:        DHCP 租约表（IP-MAC绑定/租约到期等）
+#   - system_logs:        系统日志（近期事件/告警/错误等）
+#   - policies:           策略/规则配置（客服权限/操作限制/自动规则等）
+# ============================================================================
 READONLY_TABLES = [
-    "orders",            # 订单
-    "customers",         # 客户档案
-    "customer_memory",   # 客户历史记忆
-    "tracking",          # 物流轨迹
-    "attachments",       # 客户上传附件（破损图等，attachment.inspect 用）
-    "charges",           # 扣款明细
-    "fulfillment",       # 履约/发货信息
-    "invoices",          # 发票
-    "returns",           # 历史退货
-    "warranty",          # 保修信息
-    "subscriptions",     # 订阅信息
-    "accounts",          # 账户信息
-    "refunds",           # 历史退款
-    "risk_profiles",     # 风险画像
-    "troubleshooting_kb",# 故障排查知识库
+    "device_info",        # 设备基本信息（型号、固件版本、IMEI、运行时长等）
+    "wifi_config",        # WiFi 当前配置（SSID、密码、信道、频段、隐藏状态、加密方式等）
+    "network_status",     # 网络实时状态（连接状态、信号强度、上下行速率、延迟、丢包率等）
+    "connected_clients",  # 已连接客户端列表（MAC地址、IP、设备名称、连接时长、实时流量等）
+    "data_usage",         # 流量使用统计（总流量、各客户端流量、本月/今日用量、剩余额度等）
+    "network_settings",   # 网络高级设置（MTU、IPv6开关、UPnP、端口映射、防火墙规则等）
+    "dhcp_leases",        # DHCP 租约表（MAC-IP映射、租约获取时间、到期时间、主机名等）
+    "system_logs",        # 系统日志（近期事件、告警、错误、操作记录等时间序列数据）
+    "policies",           # 策略/规则配置（客服可操作范围、自动限速规则、黑白名单等）
 ]
 
 
 def default_sandbox() -> dict[str, Any]:
-    """返回全部为空的初始沙箱（list 台账为 []，按状态语义建模的台账为 {}）。
+    """返回全部为空的初始沙箱（所有台账均为 [] 事件流语义）。
+
+    WiFi 场景下 5 个台账全部是"事件流"（每次写 append 一条记录），没有状态型 dict 台账。
+    因为所有写操作都是"记录一次操作发生"，不存在"某个对象的当前状态"需要覆盖。
 
     用作 EnvSnapshotSchema.sandbox_initial 的默认工厂，并在 model_validator 中作为补齐基底，
     确保每个 case 的沙箱都含齐 SANDBOX_KEYS 全部 namespace。
     """
     return {
-        "sandbox_refund_ledger": [],
-        "sandbox_returns": [],
-        "sandbox_reshipments": [],
-        "sandbox_order_state": {},
-        "sandbox_carrier_investigation": [],
-        "sandbox_carrier_intercept": [],
-        "sandbox_carrier_reroute": [],
-        "sandbox_approval_cases": [],
-        "sandbox_payment_disputes": [],
-        "sandbox_invoice_changes": [],
-        "sandbox_subscription_state": {},
-        "sandbox_security_cases": [],
-        "sandbox_message_log": [],
-        "sandbox_ticket_state": {},
-        "sandbox_audit_log": [],
+        "wifi_config_log": [],
+        "switch_log": [],
+        "data_limit_log": [],
+        "ip_config_log": [],
+        "operation_log": [],
     }
 
 
 class EnvSnapshotSchema(BaseModel):
     """单条 case 的世界状态快照。"""
 
-    # extra="allow"：环境数据规范 形状仍在演进，允许额外业务快照字段（risk/memory 等）透传。
+    # extra="allow"：环境数据规范 形状仍在演进，允许额外业务快照字段透传。
     model_config = ConfigDict(extra="allow")
 
     version: str = "env_v1"  # schema 版本
     case_id: str  # 关联的 case
     reference_now: str  # 参考时钟（ISO 时间串），所有相对时间计算的基准
-    readonly_tables: dict[str, Any] = Field(default_factory=dict)  # 只读业务台账（缺失键由 validator 补 {}）
+    readonly_tables: dict[str, Any] = Field(default_factory=dict)  # 只读设备台账（缺失键由 validator 补 {}）
     policies: list[dict[str, Any]] = Field(default_factory=list)  # policy 数据 列表
     external_services: dict[str, Any] = Field(default_factory=dict)  # 外部服务的确定性罐头响应
     tool_faults: dict[str, Any] = Field(default_factory=dict)  # 注入的工具故障/延迟（环境注入报错，不扣 efficiency）

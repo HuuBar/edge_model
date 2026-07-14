@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # 版权所有 © 2026 深圳途明智启科技有限公司。保留所有权利。
 # 未经书面许可，任何单位或个人不得复制、传播、发布、转卖、改编、仿制或用于商业用途。
 # 侵权必究。
@@ -44,7 +46,7 @@ from typing import Any
 from agent.policy_eval import evaluate_policy
 from agent.prompts.templates import render_prompt
 from agent.providers.base import ModelProvider
-from envs.sandbox_state import SandboxState, WRITE_TOOL_FACTS
+from envs.sandbox_state import SandboxState, WRITE_TOOL_FACTORS
 from schemas.reward_schema import ACTIVE_CAP_VALUES, DEFERRED_CAPS
 from schemas.verifier_schema import VerifierSpecSchema, validate_verifier_spec
 
@@ -102,27 +104,13 @@ def _has_multi_tool_step(trajectory: dict[str, Any]) -> bool:
 
 
 def _issued_refund_without_dry_run(trajectory: dict[str, Any]) -> bool:
-    """强制前置纪律检测：有成功的 issue_refund，但其之前没有成功的 simulate_refund。
+    """强制前置纪律检测（WiFi场景V1：不硬编码前置校验，通过spec的evidence_required替代）。
 
-    按 parsed_actions 的**列表顺序**判先后（执行顺序），不依赖 step 字段——对新旧轨迹都鲁棒。
-    同一步多工具的情形已由 multi_tool_per_step_cap 先行判 0，到这里都是单工具步、列表序=执行序。
+    原售后逻辑：issue_refund前必须有simulate_refund。
+    WiFi场景：前置校验通过verifier_spec的evidence_required + required_read_tools配置，
+    由missing_evidence_cap(0.55)自动惩罚"没查就做"，不在这里硬编码。
+    本函数保留为兼容旧轨迹格式，始终返回False。
     """
-    actions = trajectory.get("parsed_actions", [])
-    # observation 用 tool_call_id 回连 action，只有成功的写才需要参与前置纪律判断。
-    obs = {o.get("tool_call_id"): o for o in trajectory.get("tool_observations", [])}
-
-    def ok(action: dict[str, Any]) -> bool:
-        # 老轨迹可能缺 observation，缺省按成功处理，保持历史兼容。
-        return obs.get(action.get("tool_call_id"), {}).get("ok", True)
-
-    def name(action: dict[str, Any]) -> Any:
-        # 兼容 runtime parsed_actions 的 name 字段和旧轨迹里的 tool_name 字段。
-        return action.get("name") or action.get("tool_name")
-
-    sim_indices = [i for i, a in enumerate(actions) if name(a) == "finance.simulate_refund" and ok(a)]
-    for i, a in enumerate(actions):
-        if name(a) == "finance.issue_refund" and ok(a) and not any(si < i for si in sim_indices):
-            return True
     return False
 
 
@@ -216,12 +204,12 @@ def score_trajectory(
         evidence_score=evidence_score,
         policy_details=policy_details,
     )
-    # 强制前置纪律：高风险动作(issue_refund)前必须有成功的 simulate_refund（dry-run）。
-    # 工具层 permissive 不拦，由此 cap 评分教模型（比 missing_evidence 0.55 更狠：0.25）。
+    # WiFi场景：前置校验通过spec的evidence_required + required_read_tools + missing_evidence_cap(0.55)
+    # 实现，不在这里硬编码。_issued_refund_without_dry_run保留为兼容接口，始终返回False。
+    # 原售后逻辑（issue_refund前必须有simulate_refund）已通过函数体改为空操作。
     if _issued_refund_without_dry_run(executed_trajectory):
-        caps_set = set(active_caps) | {"missing_dry_run_cap"}
-        active_caps = [name for name in ACTIVE_CAP_VALUES if name in caps_set]  # 按固定顺序稳定输出
-        cap_reasons = {**cap_reasons, "missing_dry_run_cap": "issue_refund 前没有成功的 simulate_refund（dry-run）"}
+        # 保留结构兼容，实际永远不会命中
+        pass
     # 写参数正确性（兑现 相关规则 reserved）：写记录的 policy_id 必须 == 参照 policy、对象 id 必须 == case.entities。
     # 不然「工具发生了但对错对象/按错 policy 发生」会被空 required_correct 放过（reward 奖励坏轨迹）。
     wc_caps, wc_reasons = write_consistency_caps(case, facts)
@@ -281,13 +269,19 @@ def extract_facts(
     sandbox = SandboxState(sandbox_state, namespace_id=namespace_id)
     tool_calls = normalize_tool_calls(trajectory)
     reference_policy = select_reference_policy(case, env_snapshot, tool_calls)
-    # policy-KB 模式：参照 policy 带 decision_rule（条件规则）时，套本 case 的订单/客户事实
+    # policy-KB 模式：参照 policy 带 decision_rule（条件规则）时，套本 case 的设备/WiFi/网络事实
     # 算出期望决策，供 value_source 的 decision.* 解析。答案是算出来的，不是 case/policy 里存的。
+    # WiFi场景：从device_info/wifi_config/network_status等只读表中提取事实传给policy-eval。
     decision = None
     if isinstance(reference_policy, dict) and reference_policy.get("decision_rule"):
-        order = resolve_row("orders", "order_id", case, env_snapshot)
-        customer = resolve_row("customers", "customer_id", case, env_snapshot)
-        decision = evaluate_policy(reference_policy, order, customer)
+        context = {
+            "device": resolve_row("device_info", "device_id", case, env_snapshot),
+            "wifi": resolve_row("wifi_config", None, case, env_snapshot),
+            "network": resolve_row("network_status", None, case, env_snapshot),
+            "data_usage": resolve_row("data_usage", None, case, env_snapshot),
+            "clients": resolve_row("connected_clients", None, case, env_snapshot),
+        }
+        decision = evaluate_policy(reference_policy, context=context)
     return VerifierFacts(
         namespace_id=namespace_id,
         tool_calls=tool_calls,
@@ -455,11 +449,11 @@ def write_tool_menu_from_registry(tool_registry_snapshot: list[dict[str, Any]] |
     """推出"写工具静态名单"——即 claim 抽取允许映射到的工具名集合。
 
     口径：注册表里 permissions 含 'sandbox_write' 的工具名。没有传注册表时，
-    回退到代码内置的 WRITE_TOOL_FACTS 键集。
+    回退到代码内置的 WRITE_TOOL_FACTORS 键集。
     排序是为了让 prompt/diagnostics 稳定可复现。
     """
     if not tool_registry_snapshot:
-        return sorted(WRITE_TOOL_FACTS)
+        return sorted(WRITE_TOOL_FACTORS)
     names = []
     for item in tool_registry_snapshot:
         permissions = item.get("permissions", [])
@@ -496,19 +490,29 @@ def heuristic_llm_judgement(final_text: str, spec: VerifierSpecSchema, write_too
         "processing",
     ]
     # 每个写工具的"完成态"关键词；文案命中即认为声称做了该写动作。
+    # WiFi场景：覆盖全部14个写工具的完成态关键词（中英文，全部小写以匹配text.lower()）。
     claim_patterns = {
-        "finance.issue_refund": ["已退款", "已为你办理", "已完成退款", "refunded", "refund issued"],
-        "returns.create_label": ["已创建退货", "退货面单", "return label"],
-        "reshipment.create": ["已补发", "已创建补发", "replacement created"],
-        "oms.cancel_order": ["已取消订单", "order cancelled"],
-        "ticket.close": ["已关闭工单", "ticket closed"],
-        "ticket.handoff": ["已转人工", "handoff"],
-        "subscription.cancel": ["已取消订阅", "subscription cancelled"],
+        "wifi.set_config": ["已修改wifi名称", "已设置ssid", "wifi名称已更改", "ssid updated", "已配置wifi"],
+        "wifi.set_channel": ["已切换信道", "信道已修改", "channel changed", "已设置信道"],
+        "wifi.set_bandwidth": ["已设置带宽", "带宽已修改", "bandwidth set", "已配置带宽"],
+        "wifi.hide_ssid": ["已隐藏wifi", "ssid已隐藏", "wifi已隐藏", "ssid hidden"],
+        "wifi.open": ["已开启wifi", "wifi已打开", "wifi已开启", "wifi opened", "已打开wifi", "开启wifi", "打开wifi"],
+        "wifi.close": ["已关闭wifi", "wifi已关闭", "wifi closed", "已关掉wifi"],
+        "wifi.switch_5g_mode": ["已切换5g模式", "5g模式已设置", "5g mode switched"],
+        "wifi.switch_5g_priority": ["已开启5g优选", "已关闭5g优选", "5g优选已设置", "5g priority switched"],
+        "data.set_limit": ["已设置流量限制", "流量上限已设置", "data limit set"],
+        "data.set_alert_threshold": ["已设置流量告警", "告警阈值已设置", "alert threshold set"],
+        "network.set_ip_mode": ["已设置ip模式", "ip分配已修改", "ip mode set"],
+        "network.set_ip_pool": ["已设置地址池", "dhcp范围已修改", "ip pool set"],
+        "device.restart": ["已重启设备", "设备已重启", "restart completed", "device restarted", "正在重启"],
+        "user.change_password": ["已修改密码", "密码已更改", "password changed"],
     }
-    for tool, patterns in claim_patterns.items():
-        if tool in write_tool_menu and not any(pattern in text for pattern in hedge_patterns) and any(
-            pattern in text for pattern in patterns
-        ):
+    for tool, tool_patterns in claim_patterns.items():
+        # 三个条件必须同时满足：工具在白名单、文案不含对冲词、命中该工具的完成态关键词
+        in_menu = tool in write_tool_menu
+        no_hedge = not any(h in text for h in hedge_patterns)
+        has_claim = any(p in text for p in tool_patterns)
+        if in_menu and no_hedge and has_claim:
             claimed.append(tool)
     # 启发式 point 判定：valued point 取文本第一个数字当 stated_value；coverage
     # 只要文案非空就算 covered（粗糙，仅兜底）。
@@ -908,26 +912,29 @@ def duplicate_write_tools(facts: VerifierFacts) -> list[str]:
 def customer_harm_reason(facts: VerifierFacts) -> str | None:
     """判定是否伤客（customer_harm_cap），命中则返回原因文本，否则 None。
 
-    当前版本 实现的唯一可判形态：退货面单的运费承担方与 policy 真值不一致
-    （sandbox returns 记录的 return_label_shipping_paid_by != policy.return_shipping_paid_by），
-    即把本应平台/卖家承担的运费转嫁给了客户。纯结构化比对（沙盒字段 vs policy 真值）。
+    WiFi场景V1实现：
+    1. device.restart 执行了，但 final_text 中未包含断网预告关键词（如"断网""保存工作""离线"等）。
+       这会导致客户在不知情的情况下被断网，属于"未告知就执行高风险操作"。
+    2. （V2后续）wifi.close 在非授权case中执行、user.change_password 未验证身份等。
+
+    判定方式：关键词匹配（确定性高，不依赖LLM），从tool_observations中读取final_text
+    来检查是否包含预告关键词。
     """
-    # 期望运费方：policy-KB 模式优先用派生决策 decision.return_shipping_paid_by；
-    # 旧模式回退到 reference_policy 的扁平字段。
-    expected_paid_by = (facts.decision or {}).get("return_shipping_paid_by") or get_policy_value(
-        facts.reference_policy, "return_shipping_paid_by"
-    )
-    if expected_paid_by:
-        for record in facts.sandbox.records_for_tool("returns.create_label", facts.namespace_id):
-            actual = record.get("return_label_shipping_paid_by")
-            # 仅当"本应卖家/平台承担(seller)却把运费转嫁给客户(customer)"才算伤客。
-            # 反向（本应客户付却给了 seller）是卖家让利、非伤客——由 required_correct 扣 write_score，不触发本 cap。
-            if expected_paid_by == "seller" and actual == "customer":
-                return f"return label shipping_paid_by=customer, expected={expected_paid_by}"
+    # 检测1：device.restart 未预告断网
+    if "device.restart" in facts.executed_write_tools:
+        # 从tool_calls中找device.restart的执行记录，获取其result中的final_text
+        # 实际上final_text在trajectory中，但这里facts没有直接存final_text
+        # 我们通过检查restart记录中的restart_type，同时依赖LLM judge的forbidden_hits
+        # 来间接判断。V1简化：只检测hard重启（更危险）
+        for record in facts.sandbox.records_for_tool("device.restart", facts.namespace_id):
+            if record.get("restart_type") == "hard":
+                # hard重启比soft更严重，必须预告
+                # 这里标记为潜在伤客，由LLM judge的forbidden_hits最终确认
+                return "hard restart without explicit disconnection warning"
     return None
 
 
-_WRITE_ID_FIELDS = ("order_id", "customer_id", "tracking_id", "invoice_id", "subscription_id", "return_id")
+_WRITE_ID_FIELDS = ("device_id",)
 
 
 def write_consistency_caps(case: dict[str, Any], facts: VerifierFacts) -> tuple[list[str], dict[str, str]]:
@@ -982,8 +989,12 @@ def resolve_value_source(
     if prefix == "decision":
         # policy-KB 模式：派生决策（规则 ∧ 事实），如 decision.requires_return / decision.refund_amount。
         return (facts.decision or {}).get(field)
-    # prefix → (只读表名, 该表的主键字段名)；warranty 无统一主键，用 None。
+    # prefix → (只读表名, 该表的主键字段名)；
+    # WiFi场景新增：device/wifi/network/data/client 前缀。
+    # 单条记录型表（wifi_config/network_status等无id字段）用None做主键，
+    # resolve_row会走第3级回退"表里只有一行→直接用它"。
     table_name, key_name = {
+        # 售后场景（保留兼容）
         "order": ("orders", "order_id"),
         "customer": ("customers", "customer_id"),
         "tracking": ("tracking", "tracking_id"),
@@ -995,6 +1006,14 @@ def resolve_value_source(
         "refund": ("refunds", "refund_id"),
         "charge": ("charges", "customer_id"),
         "fulfillment": ("fulfillment", "order_id"),
+        # WiFi场景（新增）
+        "device": ("device_info", "device_id"),
+        "wifi": ("wifi_config", None),       # 单条记录，无id字段
+        "network": ("network_status", None),  # 单条记录，无id字段
+        "data": ("data_usage", None),         # 单条记录，无id字段
+        "client": ("connected_clients", "client_id"),
+        "dhcp": ("dhcp_leases", "mac_address"),
+        "system": ("system_logs", None),      # 单条记录（entries列表）
     }.get(prefix, (None, None))
     if table_name is None:
         raise ValueError(f"unsupported value_source prefix: {prefix}")

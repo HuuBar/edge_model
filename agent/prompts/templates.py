@@ -25,7 +25,7 @@ from jinja2 import Template
 
 # prompt 模板版本号：随模板正文/结构变更而 bump，进入每条 trajectory 与 manifest，
 # 是 GRPO group 同质性校验的关键字段之一（同组必须同 prompt_template_version）。
-PROMPT_TEMPLATE_VERSION = "stage1_prompt_v1"
+PROMPT_TEMPLATE_VERSION = "wifi_prompt_v1"
 # prompt 目录固定为本文件所在目录（agent/prompts/），所有 .txt 模板都在这里。
 PROMPT_DIR = Path(__file__).resolve().parent
 
