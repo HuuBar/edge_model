@@ -6,45 +6,168 @@ from __future__ import annotations
 
 """本地 Hugging Face provider：用 transformers 直接在本机加载权重做推理（延迟导入）。
 
+NPU适配要点：
+1. 支持指定 npu_device 加载到空闲卡（避开被VLLM占用的卡）
+2. 自动根据模型大小选择精度：4B及以下用FP16，8B及以上用BF16
+3. 加载前强制清理显存（gc + empty_cache + synchronize）
+4. 生成后支持彻底卸载模型释放显存
+
 特意把 transformers 的 import 推迟到真正用到时（``_load``），使得在未选用该 provider
 的环境（如只跑 API provider 的轻量进程）无需安装重型依赖即可导入本包。
 """
 
 from __future__ import annotations
 
+import gc
 import json
+import os
 from typing import Any
 
 from agent.providers.base import ModelOutput
 
 
 class LocalHFProvider:
-    """本地 transformers 推理 provider；模型/分词器按需懒加载并缓存。"""
+    """本地 transformers 推理 provider；模型/分词器按需懒加载并缓存。
 
-    def __init__(self, model_path: str, model_name: str | None = None, device_map: str = "auto"):
+    NPU适配：支持指定目标NPU设备、自动选择精度（FP16/BF16）、强制显存清理。
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        model_name: str | None = None,
+        device_map: str = "auto",
+        npu_device: int | None = None,
+        torch_dtype: str | None = None,
+    ):
         self.model_path = model_path
         # 逻辑模型名缺省回退为权重路径，保证 ModelOutput.model_name 非空
         self.model_name = model_name or model_path
-        # 设备映射策略，"auto" 交由 accelerate 自动分配（多卡/CPU 兜底）
+        # NPU设备指定：优先用 npu_device，否则回退到 device_map
+        self.npu_device = npu_device
         self.device_map = device_map
+        # 精度：显式指定 > 自动根据模型大小选择
+        self.torch_dtype_str = torch_dtype
         # 延迟加载：首次 generate 时才真正实例化，避免构造即吃显存
         self._tokenizer = None
         self._model = None
+
+    def _estimate_model_size(self) -> float:
+        """估算模型参数量（B），用于自动选择精度。"""
+        try:
+            config_path = os.path.join(self.model_path, "config.json")
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            # 从配置读取层数和隐藏层大小
+            num_layers = config.get("num_hidden_layers", 0)
+            hidden_size = config.get("hidden_size", 0)
+            vocab_size = config.get("vocab_size", 0)
+            intermediate_size = config.get("intermediate_size", hidden_size * 4)
+            # Qwen3架构参数量估算 (rough estimate)
+            # embedding: vocab_size * hidden_size
+            # each layer: 4 * hidden_size^2 (attn) + 3 * hidden_size * intermediate_size (mlp)
+            embed_params = vocab_size * hidden_size
+            layer_params = 4 * hidden_size * hidden_size + 3 * hidden_size * intermediate_size
+            total_params = embed_params + num_layers * layer_params + hidden_size  # lm_head shares with embed
+            return total_params / 1e9  # 返回B（十亿参数）
+        except Exception:
+            # 如果读不到配置，从路径名猜测
+            path_lower = self.model_path.lower()
+            if "0.6b" in path_lower:
+                return 0.6
+            if "1.7b" in path_lower or "1.8b" in path_lower:
+                return 1.7
+            if "4b" in path_lower:
+                return 4.0
+            if "8b" in path_lower:
+                return 8.0
+            if "14b" in path_lower:
+                return 14.0
+            if "32b" in path_lower:
+                return 32.0
+            return 4.0  # 默认按4B处理
+
+    def _resolve_dtype(self):
+        """解析dtype：显式指定 > 自动选择（大模型用BF16防溢出，小模型用FP16省显存）。"""
+        import torch
+        if self.torch_dtype_str:
+            return getattr(torch, self.torch_dtype_str)
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            model_size = self._estimate_model_size()
+            # 6B及以上用BF16（表示范围大，避免精度溢出）
+            # 6B以下用FP16（省显存，精度够）
+            if model_size >= 6.0:
+                if torch.npu.is_bf16_supported():
+                    return torch.bfloat16
+                # NPU不支持BF16时回退到FP32（可能会OOM）
+                return torch.float32
+            return torch.float16
+        return torch.float32
+
+    def _cleanup_npu(self):
+        """强制清理NPU显存：gc + empty_cache + synchronize"""
+        gc.collect()
+        import torch
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            torch.npu.empty_cache()
+            torch.npu.synchronize()
+
+    def unload(self):
+        """彻底卸载模型并清理显存。切换模型前必须调用。"""
+        if self._model is not None:
+            del self._model
+            self._model = None
+        if self._tokenizer is not None:
+            del self._tokenizer
+            self._tokenizer = None
+        self._cleanup_npu()
 
     def _load(self) -> None:
         """惰性加载分词器与模型；已加载则直接返回（幂等）。"""
         if self._model is not None:
             return
+
         # 延迟导入 transformers：仅在确实使用本地推理时才付出依赖/加载成本
         from transformers import AutoModelForCausalLM, AutoTokenizer
+        import torch
+
+        # 强制清理显存（关键：避免前一个模型残留导致OOM）
+        self._cleanup_npu()
+
+        # 如果指定了NPU设备，设置当前设备（避开被VLLM占用的卡0/1/4/5）
+        if self.npu_device is not None and torch.npu.is_available():
+            torch.npu.set_device(self.npu_device)
+
+        # 自动选择精度并打印
+        dtype = self._resolve_dtype()
+        model_size = self._estimate_model_size()
+        print(f"  [LocalHF] Model size: ~{model_size:.1f}B, dtype: {dtype}")
 
         # trust_remote_code：允许加载仓库自带的自定义建模代码（如 Qwen 等自定义架构）
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            self.model_path, trust_remote_code=True
+        )
+
+        # 构建加载参数
+        load_kwargs = {
+            "trust_remote_code": True,
+            "torch_dtype": dtype,
+            "low_cpu_mem_usage": True,
+        }
+
+        # 设备映射：指定到目标NPU单卡，或用auto
+        if self.npu_device is not None:
+            load_kwargs["device_map"] = {"": f"npu:{self.npu_device}"}
+        else:
+            load_kwargs["device_map"] = self.device_map
+
         self._model = AutoModelForCausalLM.from_pretrained(
             self.model_path,
-            device_map=self.device_map,
-            trust_remote_code=True,
+            **load_kwargs,
         )
+
+        # 加载完成后再次清理
+        self._cleanup_npu()
 
     def generate(
         self,
@@ -73,8 +196,8 @@ class LocalHFProvider:
         # 编码并搬到模型所在设备
         inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
         # 生成前清理缓存，避免NPU显存碎片导致OOM（尤其对4B/8B大模型）
+        import torch
         if hasattr(self._model.device, 'type') and self._model.device.type == 'npu':
-            import torch
             torch.npu.empty_cache()
             torch.npu.synchronize()
         # 构建generate参数，确保与模型config不冲突
