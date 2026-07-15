@@ -1,7 +1,3 @@
-# 版权所有 © 2026 深圳途明智启科技有限公司。保留所有权利。
-# 未经书面许可，任何单位或个人不得复制、传播、发布、转卖、改编、仿制或用于商业用途。
-# 侵权必究。
-
 """Rollout artifact IDs and persistent storage.
 
 runtime 只负责跑出一条内存里的 trajectory；本模块负责“工程落盘”：
