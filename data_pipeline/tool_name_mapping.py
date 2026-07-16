@@ -58,6 +58,10 @@ TOOL_NAME_MAP: dict[str, str | None] = {
     "close_wifi": "wifi.close",                           # 同wifi.close
     "disable_wifi": "wifi.close",                         # 同wifi.close
 
+    # ── 特殊映射（需要根据参数判断） ──
+    # "switch_wifi_enable" → 根据 action=ON/OFF 判断为 wifi.open / wifi.close
+    # 这个不在TOOL_NAME_MAP中，由 map_tool_name_with_args() 特殊处理
+
     # ── 以下工具在新代码中未定义，映射为None（需人工确认） ──
     "switch_firewall": None,                              # 防火墙开关
     "switch_game_turbo": None,                            # 游戏加速
@@ -67,6 +71,32 @@ TOOL_NAME_MAP: dict[str, str | None] = {
     "get_temperature": None,                              # 温度
     "set_apn": None,                                      # 设置APN
 }
+
+
+def map_tool_name_with_args(old_name: str, args: dict | None = None) -> str | None:
+    """带参数的工具名映射（处理需要根据参数判断的情况）。
+
+    特殊情况:
+      - "switch_wifi_enable" + {"action": "ON"}  → "wifi.open"
+      - "switch_wifi_enable" + {"action": "OFF"} → "wifi.close"
+      - "switch_wifi_enable" + 无args             → None（无法判断）
+    """
+    if not old_name:
+        return None
+
+    # 特殊处理：switch_wifi_enable 需要根据 action 参数判断
+    if old_name in ("switch_wifi_enable",):
+        if args:
+            action = str(args.get("action", "")).upper()
+            if action == "ON":
+                return "wifi.open"
+            elif action == "OFF":
+                return "wifi.close"
+        # 无法判断时返回None
+        return None
+
+    # 普通映射
+    return map_tool_name(old_name)
 
 
 def map_tool_name(old_name: str) -> str | None:
